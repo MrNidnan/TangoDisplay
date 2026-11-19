@@ -4,6 +4,23 @@
         <title>TangoDisplay</title>
         <link>https://github.com/richardsladetdj-creator/TangoDisplay</link>
         <item>
+            <title>Version 4.0.1</title>
+            <pubDate>Thu, 19 Nov 2026 07:53:02 +0000</pubDate>
+            <sparkle:version>114</sparkle:version>
+            <sparkle:shortVersionString>4.0.1</sparkle:shortVersionString>
+            <description><![CDATA[
+                <ul>
+                    <li><b>Skip Auto-fade works on a playing cortina:</b> choosing Skip Auto-fade after the cortina had been marked as played cleared the indicator but the cortina still faded. It now cancels the fade any time before fading begins.</li>
+                    <li><b>Progress bar on replay:</b> a track re-marked "not played" and played again could show its progress bar clipped. The row now refreshes when it becomes the live track.</li>
+                </ul>
+            ]]></description>
+            <enclosure
+                url="https://github.com/richardsladetdj-creator/TangoDisplay/releases/download/v4.0.1/TangoDisplay-v4.0.1-universal.zip"
+                sparkle:edSignature="4E0ZZulKGGW8eh2evIftRJUxF54O28Nvbc05+DSp6+xiDrVJ+iUp9eATulwi1+mgv2rFoF0MQGKg6ldt5/5GCw=="
+                length="7941120"
+                type="application/zip"/>
+        </item>
+        <item>
             <title>Version 4.0.0</title>
             <pubDate>Mon, 12 Oct 2026 11:06:24 +0000</pubDate>
             <sparkle:version>113</sparkle:version>
