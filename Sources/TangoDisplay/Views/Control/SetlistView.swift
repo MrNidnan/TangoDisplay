@@ -1067,8 +1067,15 @@ struct SetlistView: View {
         let entries = settings.hidePlayed
             ? setlist.entries.filter { $0.state != .played || $0.id == activeEntryID }
             : setlist.entries
+        // Live flag is part of row identity: NSTableView doesn't always re-measure a
+        // row when the progress bar is inserted (e.g. replaying a track re-marked
+        // "not played"), leaving it clipped. A new identity forces a fresh row.
+        // Selection is unaffected — it keys off .tag(entry.id).
+        let liveID = isPlayerActive ? activeEntryID : nil
+        let rows = entries.map { (entry: $0, key: "\($0.id)-\($0.id == liveID)") }
         return List(selection: $selectedIDs) {
-            ForEach(entries) { entry in
+            ForEach(rows, id: \.key) { row in
+                let entry = row.entry
                 let autoGapIgnored = settings.autoGapEnabled &&
                     entry.autoGapIgnored(isFirstTrack: nonePlayedYet && entry.id == firstID,
                                          ignoreFirstTrack: settings.autoGapIgnoreFirstTrack)

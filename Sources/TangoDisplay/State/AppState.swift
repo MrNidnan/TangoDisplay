@@ -269,8 +269,10 @@ final class AppState: ObservableObject {
 
     func toggleIgnoresAutoFadeForEntry(id: UUID) {
         setlist.toggleIgnoresAutoFade(id: id)
-        guard let entry = setlist.entries.first(where: { $0.id == id }),
-              entry.state == .playing else { return }
+        // Key off current entry, not state: "mark as played after N seconds" flips the
+        // playing cortina to .played mid-track, which used to skip the cancel below.
+        guard id == localPlayer?.currentEntryID,
+              let entry = setlist.entries.first(where: { $0.id == id }) else { return }
         if entry.ignoresAutoFade {
             cancelAutoFade()
         } else {
@@ -743,6 +745,7 @@ final class AppState: ObservableObject {
         autoFadeTask = nil
         guard settings.autoFadeCortinasEnabled else { return }
         guard let player = localPlayer, fadeMode == .none else { return }
+        if setlist.entries.first(where: { $0.id == player.currentEntryID })?.ignoresAutoFade == true { return }
         if let id = player.currentEntryID { setlist.setRepeat(false, for: id) }
         preFadeVolume = player.volume
         fadeMode = .fadeAndContinue
