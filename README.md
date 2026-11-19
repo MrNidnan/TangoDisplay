@@ -49,7 +49,7 @@ A native macOS menu-bar app that shows a clean, fullscreen dancer display on an 
 ### Option A — Download pre-built app (easiest)
 
 1. Go to the [Releases](https://github.com/richardsladetdj-creator/TangoDisplay/releases) page
-2. Download `TangoDisplay-v4.0.0-universal.zip` (works on both Apple Silicon and Intel Macs)
+2. Download `TangoDisplay-v4.0.1-universal.zip` (works on both Apple Silicon and Intel Macs)
 3. Unzip and drag `TangoDisplay.app` to your `/Applications` folder
 4. **Right-click › Open** on first launch (required because the app is ad-hoc signed, not notarised)
 5. Grant the permissions macOS requests (see [Permissions](#permissions) below)
@@ -135,6 +135,10 @@ Key design decisions:
 ---
 
 ## Changelog
+
+### v4.0.1
+- **Skip Auto-fade works on a playing cortina:** choosing **Skip Auto-fade** after the cortina had been marked as played (the "mark as played after N seconds" point) cleared the indicator but the cortina still faded. It now cancels the fade any time before fading begins.
+- **Progress bar on replay:** a track re-marked "not played" and played again could show its progress bar clipped. The row now refreshes when it becomes the live track.
 
 ### v4.0.0
 - **Edit Tags:** right-click a setlist row and choose **Edit Tags…** to change the track's title, artist, genre, year, grouping, album artist and comment — written into the audio file itself, not a local override. A blank field removes that tag. The row and the dancer display update straight away, including the "Coming Up" preview, and a genre edit can turn a track into (or out of) a cortina. The save goes to a temporary copy that is swapped in only once complete, so a crash or full disk never leaves a half-written file, and a track that is playing keeps playing. For tracks dragged from Apple Music, the library's own file is updated too and Music is told to refresh it (this may launch Music). Supports MP3, M4A, AIFF, WAV, FLAC and Opus; greyed out for read-only files. Built-in player only.
