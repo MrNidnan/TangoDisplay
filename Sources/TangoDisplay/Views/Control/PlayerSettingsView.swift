@@ -249,10 +249,7 @@ struct PlayerSettingsView: View {
                     groupHeading("Cortinas")
                 }
 
-                // MARK: Safety
-
                 Section {
-                    subgroupLabel("Auto-gap")
                     Toggle("Auto-gap", isOn: $settings.autoGapEnabled)
                     if settings.autoGapEnabled {
                         LabeledContent("Minimum gap") {
@@ -261,6 +258,20 @@ struct PlayerSettingsView: View {
                                 Text("\(settings.autoGapDuration, specifier: "%.1f")s")
                                     .font(.system(size: 12, design: .monospaced))
                                     .frame(width: 36, alignment: .trailing)
+                            }
+                        }
+                        Toggle("Limit maximum gap", isOn: $settings.autoGapMaximumEnabled)
+                        if let maximum = settings.autoGapMaximum {
+                            LabeledContent("Maximum gap") {
+                                HStack(spacing: 8) {
+                                    Slider(value: Binding(
+                                        get: { settings.autoGapMaximum ?? maximum },
+                                        set: { settings.autoGapMaximumDuration = $0 }
+                                    ), in: settings.autoGapDuration...10, step: 0.5)
+                                    Text("\(maximum, specifier: "%.1f") s")
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .frame(width: 48, alignment: .trailing)
+                                }
                             }
                         }
                         Toggle("Skip gap before first track", isOn: $settings.autoGapIgnoreFirstTrack)
@@ -272,10 +283,16 @@ struct PlayerSettingsView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    Text("Analyzes silence at track boundaries and adds padding so the gap between tracks meets the minimum. Only adds silence, never removes it.")
+                    Text("Auto-gap pads short transitions. A maximum also shortens detected silence at track boundaries when analysis is ready.")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                } header: {
+                    groupHeading("Silence & Gaps")
+                }
 
+                // MARK: Safety
+
+                Section {
                     subgroupLabel("Mark as Played")
                     LabeledContent("Mark as played") {
                         Picker("", selection: $settings.markAsPlayedAfterCompletion) {

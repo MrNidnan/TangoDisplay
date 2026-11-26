@@ -95,6 +95,12 @@ See the **[Wiki](https://github.com/richardsladetdj-creator/TangoDisplay/wiki)**
 
 ---
 
+## Silence & Gaps
+
+In **Settings › Player › Silence & Gaps**, turn on **Auto-gap** and set **Minimum gap**. Enable **Limit maximum gap** to also set **Maximum gap**. For a 2.5–3.5 second range, Auto-gap pads shorter transitions, preserves gaps within the range, and shortens detected silence at the track boundaries when a gap would exceed 3.5 seconds.
+
+The maximum applies to natural transitions in the built-in player. It works inside the selected track start and end times, and shortens the incoming lead-in before shortening the outgoing tail. If either edge cannot be measured in time, the player uses the minimum-gap behavior. The maximum is off by default.
+
 ## Building and Testing
 
 Use the Xcode Command Line Tools with Swift 5.9 or newer. SwiftPM resolves Sparkle and CXXTagLib from the checked-in `Package.resolved`.

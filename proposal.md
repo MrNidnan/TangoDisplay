@@ -38,6 +38,8 @@ For example, if the outgoing file has 300 ms of retained trailing silence, the i
 
 ### Optional maximum between tracks
 
+Implemented as an optional built-in-player control under **Player › Silence & Gaps**. The standalone Affix Silence and Skip Silence controls are still proposed.
+
 Add **Maximum gap** as an optional Auto-gap setting. For a **2,500–3,500 ms** range, add silence when the planned transition is under 2,500 ms, leave it alone within the range, and shorten the recorded silence at the track edges when it would exceed 3,500 ms. For example, a 2,000 ms gap becomes 2,500 ms, a 3,000 ms gap stays as recorded, and a 6,000 ms gap becomes 3,500 ms. This setting works independently of Skip Silence inside songs.
 
 Measure the gap from the last audible sound of the outgoing track to the first audible sound of the incoming track. After manual trim and any enabled Skip Silence, apply the cap to quiet edge material only. Shorten the incoming silence first, then shorten the outgoing tail if needed. Plan that tail before it plays, since the player cannot reclaim silence the audience has already heard. Preserve the next attack and honor explicit affix padding. If the affix padding alone exceeds the maximum, flag the conflict in settings. If edge analysis is unavailable in time, play on schedule using the existing minimum-gap behavior.

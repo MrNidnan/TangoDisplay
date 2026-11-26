@@ -1069,6 +1069,61 @@ func runPreparedAutoGapTests() {
             try expectEqual(q.injectedDuration(currentID: a, nextID: b, target: .infinity), 0)
         }
     }
+
+    suite("Optional maximum gap") {
+        func plan(trailing: Double, leading: Double, fixed: Double = 0,
+                  alreadyCut: Double = 0, maximum: Double? = 3.5) throws -> PreparedAutoGap.Adjustment {
+            let pair = PreparedAutoGap(currentID: a, nextID: b, trailing: trailing, leading: leading)
+            guard let adjustment = pair.adjustment(currentID: a, nextID: b, minimum: 2.5,
+                                                  maximum: maximum, protectedPadding: fixed,
+                                                  outgoingTrimApplied: alreadyCut) else {
+                throw TestFailure(message: "Expected a transition plan", file: #file, line: #line)
+            }
+            return adjustment
+        }
+
+        test("raises a 2-second gap to the 2.5-second minimum") {
+            let adjustment = try plan(trailing: 1, leading: 1)
+            try expectEqual(adjustment.padding, 0.5)
+            try expectEqual(adjustment.leadingTrim + adjustment.trailingTrim, 0)
+        }
+
+        test("leaves a 3-second gap intact") {
+            let adjustment = try plan(trailing: 1, leading: 2)
+            try expectEqual(adjustment.padding + adjustment.leadingTrim + adjustment.trailingTrim, 0)
+        }
+
+        test("shortens a 6-second gap by using incoming silence first") {
+            let adjustment = try plan(trailing: 2, leading: 4)
+            try expectEqual(adjustment.leadingTrim, 2.5)
+            try expectEqual(adjustment.trailingTrim, 0)
+        }
+
+        test("cuts the outgoing tail only when the incoming edge is too short") {
+            let adjustment = try plan(trailing: 5, leading: 1)
+            try expectEqual(adjustment.leadingTrim, 1)
+            try expectEqual(adjustment.trailingTrim, 1.5)
+            let incoming = try plan(trailing: 5, leading: 1, alreadyCut: 1.5)
+            try expectEqual(incoming.leadingTrim, 1)
+            try expectEqual(incoming.trailingTrim, 0)
+        }
+
+        test("counts fixed padding and flags padding that alone exceeds the maximum") {
+            let adjustment = try plan(trailing: 2, leading: 1, fixed: 1.5)
+            try expectEqual(adjustment.leadingTrim, 1)
+            try expect(!adjustment.paddingExceedsMaximum)
+            let conflict = try plan(trailing: 2, leading: 1, fixed: 4)
+            try expect(conflict.paddingExceedsMaximum)
+            try expectEqual(conflict.leadingTrim + conflict.trailingTrim, 0)
+        }
+
+        test("keeps minimum-only behavior with no valid maximum") {
+            for maximum in [nil, 2, .infinity] as [Double?] {
+                let adjustment = try plan(trailing: 2, leading: 4, maximum: maximum)
+                try expectEqual(adjustment.padding + adjustment.leadingTrim + adjustment.trailingTrim, 0)
+            }
+        }
+    }
 }
 
 // MARK: - Music start/stop → trim seconds
