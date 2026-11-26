@@ -550,6 +550,7 @@ struct SetlistView: View {
     @State private var hogConflictWarning = false
     @State private var hogDeviceStolenAlertShown = false
     @State private var engineStalledAlertShown = false
+    @State private var relinkError: String?
     @State private var dropFeedback: String? = nil
 
     // Seed the @State mirrors from the player so the very first body render
@@ -574,6 +575,21 @@ struct SetlistView: View {
             .environmentObject(appState)
 
             Divider()
+
+            if let message = setlist.persistenceError ?? setlist.recoveryNotice {
+                HStack {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 12))
+                    Spacer()
+                    if setlist.persistenceError != nil {
+                        Button("Retry") { setlist.retryPersistence() }
+                            .buttonStyle(.borderless)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider()
+            }
 
             if hogConflictWarning {
                 HStack(spacing: 8) {
@@ -634,6 +650,7 @@ struct SetlistView: View {
             }
         }
         .onAppear {
+            setlist.refreshMediaAvailability()
             activeEntryID = player.currentEntryID
             isPlayerActive = player.isActivePlaying
             hogConflictWarning = player.hogModeConflict
@@ -669,7 +686,15 @@ struct SetlistView: View {
             Button("Retry") { player.retryOutputDevice() }
             Button("OK", role: .cancel) {}
         } message: {
-            Text("The audio output device did not come back, so playback was stopped. Check the device is connected and powered on, then tap Retry.")
+            Text("Check that the output device is connected and powered on, then tap Retry to continue the setlist.")
+        }
+        .alert("Couldn’t Relink Track", isPresented: Binding(
+            get: { relinkError != nil },
+            set: { if !$0 { relinkError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(relinkError ?? "")
         }
         .alert("Save Setlist Report", isPresented: $showSaveReportDialog) {
             TextField("Setlist name", text: $saveReportName)
@@ -1021,7 +1046,7 @@ struct SetlistView: View {
         if let id = activeEntryID { return id }
         guard !setlist.entries.contains(where: { $0.state == .playing || $0.state == .paused })
         else { return nil }
-        return setlist.entries.first(where: { $0.state == .queued })?.id
+        return setlist.firstPlayable?.id
     }
 
     @ViewBuilder
@@ -1046,6 +1071,7 @@ struct SetlistView: View {
             genreColorRules: settings.genreColorRules,
             genreColorTitleEnabled: settings.genreColorTitleEnabled,
             isCortina: detector.isCortina(genre: entry.track.genre),
+            mediaIssue: setlist.mediaIssues[entry.id],
             player: activeEntryID == entry.id && isPlayerActive ? player : nil
         )
         .tag(entry.id)
@@ -1288,6 +1314,11 @@ struct SetlistView: View {
             setlist.reloadMetadata(ids: Array(targets))
         }
         if targets.count == 1, let e = setlist.entries.first(where: { targets.contains($0.id) }) {
+            if setlist.mediaIssues[e.id] != nil {
+                Button("Retry Audio File") { setlist.retryMedia(id: e.id) }
+            }
+            Button("Relink Audio File…") { relink(e) }
+                .disabled(e.state == .playing || e.state == .paused || e.id == player.currentEntryID && player.isActivePlaying)
             Button("Edit Tags…") { editingTags = e }
                 .disabled(!TagEditor.canWrite(e.fileURL))
         }
@@ -1312,6 +1343,25 @@ struct SetlistView: View {
         }
         Divider()
         Button("Delete", role: .destructive) { pendingDeleteIDs = targets }
+    }
+
+    private func relink(_ entry: SetlistEntry) {
+        let panel = NSOpenPanel()
+        panel.title = "Relink \(entry.track.title)"
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let current = setlist.entries.first(where: { $0.id == entry.id }),
+              current.state != .playing, current.state != .paused,
+              current.id != player.currentEntryID || !player.isActivePlaying else {
+            relinkError = "Stop playback of this track before relinking it."
+            return
+        }
+        do {
+            try setlist.relink(id: entry.id, to: url)
+        } catch {
+            relinkError = error.localizedDescription
+        }
     }
 
     private func exportM3U8() {
@@ -1727,6 +1777,7 @@ struct SetlistRowView: View {
     var genreColorRules: [GenreColorRule] = []
     var genreColorTitleEnabled: Bool = false
     var isCortina: Bool = false
+    var mediaIssue: String? = nil
     var player: LocalPlayerSource? = nil
 
     private var isCurrent: Bool { entry.state == .playing || entry.state == .paused || isActivelyPlaying }
@@ -1770,6 +1821,13 @@ struct SetlistRowView: View {
                 }
 
                 Spacer(minLength: 4)
+
+                if let mediaIssue {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .help(mediaIssue)
+                        .accessibilityLabel(mediaIssue)
+                }
 
                 if showTime, let dur = entry.duration {
                     Text(setlistFormatDuration(dur))

@@ -71,6 +71,15 @@ func test(_ name: String, body: () throws -> Void) {
     }
 }
 
+func testAsync(_ name: String, body: () async throws -> Void) async {
+    do {
+        try await body()
+        test(name) {}
+    } catch {
+        test(name) { throw error }
+    }
+}
+
 // MARK: - CortinaDetector tests
 
 func runCortinaDetectorTests() {
@@ -1153,11 +1162,43 @@ func runPlaylistIndexClampTests() {
     }
 }
 
+func runPlaybackProgressTests() {
+    suite("Playback progress") {
+        test("a node that never renders stalls after the grace period") {
+            var progress = PlaybackProgress(startedAt: 10, scheduledDuration: 120)
+            try expect(!progress.hasStalled(sampleTime: nil, now: 12.5))
+            try expect(progress.hasStalled(sampleTime: nil, now: 13))
+        }
+
+        test("rendering a silent gap still advances the sample clock") {
+            var progress = PlaybackProgress(startedAt: 10, scheduledDuration: 120)
+            for second in 11...16 {
+                try expect(!progress.hasStalled(sampleTime: Int64(second * 44100), now: Double(second)))
+            }
+        }
+
+        test("a stuck node is detected even while it still reports a sample time") {
+            var progress = PlaybackProgress(startedAt: 10, scheduledDuration: 120)
+            try expect(!progress.hasStalled(sampleTime: 100, now: 11))
+            try expect(!progress.hasStalled(sampleTime: 100, now: 13.5))
+            try expect(progress.hasStalled(sampleTime: 100, now: 14))
+        }
+
+        test("an early completion is distinguished from a normal track ending") {
+            let progress = PlaybackProgress(startedAt: 10, scheduledDuration: 120)
+            try expect(progress.endedPrematurely(now: 48))
+            try expect(!progress.endedPrematurely(now: 128))
+        }
+    }
+}
+
 // MARK: - Main entry point
 
 runMusicTrimTests()
 runPlaylistIndexClampTests()
 runPreparedAutoGapTests()
+runPlaybackProgressTests()
+runPlaybackRecoveryTests()
 runCortinaDetectorTests()
 runTandaTrackerTests()
 runProfileStoreTests()
@@ -1168,7 +1209,7 @@ runAudioUnitPluginTests()
 runRestorationTests()
 runSliderSnapTests()
 runUpcomingOverrideTests()
-runTagWriterTests()
+await runTagWriterTests()
 
 print("\n════════════════════════════════")
 let icon = totalFailed == 0 ? "✓" : "✗"
