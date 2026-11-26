@@ -120,7 +120,7 @@ func runPlaybackRecoveryTests() {
             let paused = playbackEntry("Paused", state: .paused)
             let queued = playbackEntry("Queued")
             let entries = [played, interrupted, paused, queued]
-            _ = try SetlistStore(url: url).save(entries, preservingSnapshot: false)
+            try SetlistStore(url: url).save(entries)
 
             let restored = try SetlistStore(url: url).load()
 

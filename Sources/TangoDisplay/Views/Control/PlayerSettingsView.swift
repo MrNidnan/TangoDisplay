@@ -255,7 +255,7 @@ struct PlayerSettingsView: View {
                         LabeledContent("Minimum gap") {
                             HStack(spacing: 8) {
                                 Slider(value: $settings.autoGapDuration, in: 0.5...5, step: 0.5)
-                                Text("\(settings.autoGapDuration, specifier: "%.1f")s")
+                                Text("\(settings.autoGapDuration, format: .number.precision(.fractionLength(1)))s")
                                     .font(.system(size: 12, design: .monospaced))
                                     .frame(width: 36, alignment: .trailing)
                             }
@@ -264,11 +264,9 @@ struct PlayerSettingsView: View {
                         if let maximum = settings.autoGapMaximum {
                             LabeledContent("Maximum gap") {
                                 HStack(spacing: 8) {
-                                    Slider(value: Binding(
-                                        get: { settings.autoGapMaximum ?? maximum },
-                                        set: { settings.autoGapMaximumDuration = $0 }
-                                    ), in: settings.autoGapDuration...10, step: 0.5)
-                                    Text("\(maximum, specifier: "%.1f") s")
+                                    Slider(value: $settings.effectiveAutoGapMaximumDuration,
+                                           in: settings.autoGapDuration...10, step: 0.5)
+                                    Text("\(maximum, format: .number.precision(.fractionLength(1))) s")
                                         .font(.system(size: 12, design: .monospaced))
                                         .frame(width: 48, alignment: .trailing)
                                 }
@@ -277,15 +275,15 @@ struct PlayerSettingsView: View {
                         Toggle("Skip gap before first track", isOn: $settings.autoGapIgnoreFirstTrack)
                         Text("The first track in the setlist starts immediately with no silence preroll.")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.secondary)
                         Toggle("Skip gap after manual stop", isOn: $settings.autoGapSkipAfterManualStop)
                         Text("After you stop a track before it ends, the next track you start plays immediately with no silence preroll.")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundStyle(.secondary)
                     }
                     Text("Auto-gap pads short transitions. A maximum also shortens detected silence at track boundaries when analysis is ready.")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
                 } header: {
                     groupHeading("Silence & Gaps")
                 }

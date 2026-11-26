@@ -1350,6 +1350,7 @@ struct SetlistView: View {
         panel.title = "Relink \(entry.track.title)"
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.audio]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         guard let current = setlist.entries.first(where: { $0.id == entry.id }),
               current.state != .playing, current.state != .paused,
@@ -1824,7 +1825,7 @@ struct SetlistRowView: View {
 
                 if let mediaIssue {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
+                        .foregroundStyle(.orange)
                         .help(mediaIssue)
                         .accessibilityLabel(mediaIssue)
                 }

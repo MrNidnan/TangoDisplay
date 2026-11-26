@@ -167,7 +167,13 @@ final class AppSettings: ObservableObject {
 
     var autoGapMaximum: Double? {
         guard autoGapEnabled, autoGapMaximumEnabled else { return nil }
-        return max(autoGapDuration, autoGapMaximumDuration)
+        return effectiveAutoGapMaximumDuration
+    }
+
+    /// The maximum as the slider shows it: never below the minimum gap.
+    var effectiveAutoGapMaximumDuration: Double {
+        get { max(autoGapDuration, autoGapMaximumDuration) }
+        set { autoGapMaximumDuration = newValue }
     }
 
     @Published var autoGapIgnoreFirstTrack: Bool {

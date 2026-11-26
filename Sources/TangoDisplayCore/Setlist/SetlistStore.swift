@@ -21,16 +21,16 @@ package struct SetlistStore {
         return entries
     }
 
-    package func save(_ entries: [SetlistEntry], preservingSnapshot: Bool) throws -> URL? {
+    package func save(_ entries: [SetlistEntry]) throws {
         try prepareDirectory()
         let data = try JSONEncoder().encode(entries)
-        let backup = preservingSnapshot
-            ? url.deletingPathExtension().appendingPathExtension("recovery-\(UUID().uuidString).json")
-            : nil
-        if let backup {
-            try FileManager.default.copyItem(at: url, to: backup)
-        }
         try data.write(to: url, options: .atomic)
+    }
+
+    /// Copies the current file aside before it is overwritten, e.g. when it couldn't be decoded.
+    package func backupSnapshot() throws -> URL {
+        let backup = url.deletingPathExtension().appendingPathExtension("recovery-\(UUID().uuidString).json")
+        try FileManager.default.copyItem(at: url, to: backup)
         return backup
     }
 

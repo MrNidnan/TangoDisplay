@@ -7,7 +7,8 @@ import OSLog
 import TangoDisplayCore
 import TangoDisplayObjC
 
-final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
+@MainActor
+final class LocalPlayerSource: NSObject, ObservableObject, @preconcurrency MusicPlayerSource {
 
     // MARK: - MusicPlayerSource callbacks
 
@@ -113,7 +114,16 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
     private var scheduledPlaybackDuration: TimeInterval = 0
     private var playbackProgress: PlaybackProgress?
 
-    private var hoggedDeviceUID: String? = nil
+    /// Hog ownership is changed on `audioDeviceQueue` and released from `deinit`, so it lives
+    /// outside main-actor state behind a lock.
+    private final class HoggedDevice: @unchecked Sendable {
+        private let lock = NSLock()
+        private var uid: String?
+
+        func set(_ newValue: String?) { lock.withLock { uid = newValue } }
+        func take() -> String? { lock.withLock { defer { uid = nil }; return uid } }
+    }
+    private let hoggedDevice = HoggedDevice()
     private let audioDeviceQueue = DispatchQueue(label: "com.tangodisplay.audio-device", qos: .userInitiated)
 
     // MARK: - Private — Audio Unit plugin chain
@@ -321,7 +331,7 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
         }
     }
 
-    @objc private func handleEngineConfigChange() {
+    @objc nonisolated private func handleEngineConfigChange() {
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.isChangingDevice, self.engineRecoveryGeneration == nil else { return }
             // Invalidate any pending dataPlayedBack callbacks so the system-forced engine stop
@@ -349,13 +359,15 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
             let hogEnabled = self.settings.builtInHogMode
             let wasPlaying = self.isActivePlaying
             let savedElapsed = self.elapsed
+            let engine = self.audioEngine
+            let player = self.playerNode
 
             // Dispatch blocking CoreAudio work off the main thread to avoid a UI spinner.
             self.audioDeviceQueue.async { [weak self] in
                 guard let self else { return }
 
                 // Re-assert the user's chosen output device before restarting.
-                self.setOutputDeviceProperty(audioUnit: audioUnit, uid: uid)
+                Self.setOutputDeviceProperty(audioUnit: audioUnit, uid: uid)
 
                 // Detect hog-mode theft by another process. Checked with hog mode on too —
                 // sleep drops our claim, so another app can take the device while we're away.
@@ -368,7 +380,7 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
                 }
 
                 if deviceStolenByOther && wasPlaying {
-                    self.playerNode.stop()
+                    player.stop()
                 }
 
                 // After wake the device can take seconds to come back, so one attempt isn't
@@ -378,7 +390,7 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
                 for attempt in 0..<10 {
                     if attempt > 0 { Thread.sleep(forTimeInterval: 0.5) }
                     do {
-                        try Self.startEngine(self.audioEngine)
+                        try Self.startEngine(engine)
                         started = true
                         break
                     } catch {
@@ -428,10 +440,10 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
 
     /// Acquires hog mode on `uid` if the user wants it. Must be called from `audioDeviceQueue`
     /// (CoreAudio property set can block); all @Published writes dispatch back to main.
-    private func reacquireHogIfNeeded(uid: String, hogEnabled: Bool) {
+    nonisolated private func reacquireHogIfNeeded(uid: String, hogEnabled: Bool) {
         guard hogEnabled && !uid.isEmpty else { return }
         if AudioDeviceManager.acquireHogMode(forUID: uid) {
-            self.hoggedDeviceUID = uid
+            hoggedDevice.set(uid)
             DispatchQueue.main.async { self.hogModeConflict = false }
         } else {
             DispatchQueue.main.async { self.hogModeConflict = true }
@@ -463,26 +475,29 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
         let generation = scheduleGeneration
 
         isChangingDevice = true
+        let engine = audioEngine
+        let player = playerNode
+        // AudioUnit is a raw pointer; the engine keeps it alive while this queue uses it.
+        nonisolated(unsafe) let outputUnit = audioUnit
 
         audioDeviceQueue.async { [weak self] in
             guard let self else { return }
 
             // Release hog on the previous device.
-            if let prev = self.hoggedDeviceUID {
+            if let prev = self.hoggedDevice.take() {
                 AudioDeviceManager.releaseHogMode(forUID: prev)
-                self.hoggedDeviceUID = nil
             }
 
             // CoreAudio stop/start can block — must be off the main thread.
-            if self.audioEngine.isRunning {
-                self.playerNode.stop()
-                self.audioEngine.stop()
+            if engine.isRunning {
+                player.stop()
+                engine.stop()
             }
 
-            self.setOutputDeviceProperty(audioUnit: audioUnit, uid: uid)
+            Self.setOutputDeviceProperty(audioUnit: outputUnit, uid: uid)
 
             do {
-                try Self.startEngine(self.audioEngine)
+                try Self.startEngine(engine)
 
                 self.reacquireHogIfNeeded(uid: uid, hogEnabled: hogEnabled)
 
@@ -511,11 +526,10 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
         }
     }
 
-    private func applyHogMode(enabled: Bool, deviceUID: String) {
+    nonisolated private func applyHogMode(enabled: Bool, deviceUID: String) {
         // Must be called from audioDeviceQueue. All @Published writes dispatch back to main.
-        if let prev = hoggedDeviceUID {
+        if let prev = hoggedDevice.take() {
             AudioDeviceManager.releaseHogMode(forUID: prev)
-            hoggedDeviceUID = nil
         }
         guard enabled, !deviceUID.isEmpty else {
             let conflict: Bool
@@ -529,7 +543,7 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
             return
         }
         if AudioDeviceManager.acquireHogMode(forUID: deviceUID) {
-            hoggedDeviceUID = deviceUID
+            hoggedDevice.set(deviceUID)
             DispatchQueue.main.async { self.hogModeConflict = false }
         } else {
             DispatchQueue.main.async { self.hogModeConflict = true }
@@ -539,13 +553,13 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
 
     deinit {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
-        let uid = hoggedDeviceUID
+        let uid = hoggedDevice.take()
         audioDeviceQueue.async {
             if let uid { AudioDeviceManager.releaseHogMode(forUID: uid) }
         }
     }
 
-    private func setOutputDeviceProperty(audioUnit: AudioUnit, uid: String) {
+    nonisolated private static func setOutputDeviceProperty(audioUnit: AudioUnit, uid: String) {
         if uid.isEmpty {
             // Restore default device by reading system default
             var defaultID = AudioDeviceID(0)
@@ -644,7 +658,7 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
         }
     }
 
-    private static func analysisStatusForError(_ error: Error) -> String {
+    nonisolated private static func analysisStatusForError(_ error: Error) -> String {
         if error is CancellationError { return "ReplayGain: Cancelled" }
         switch error as? LoudnessAnalysisError {
         case .cannotOpenFile:    return "ReplayGain: Cannot read file"
@@ -729,7 +743,8 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
     }
 
     func stop() {
-        stopTrack()
+        // Deactivating the source isn't a DJ stop, so leave manualStopPending alone.
+        finishPlaybackAttempt()
         teardownObservers()
         for runtime in slotRuntimes.values {
             runtime.loadTask?.cancel()
@@ -766,6 +781,7 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
     // MARK: - Transport controls
 
     func play() {
+        // Non-blocking: a stale result only means a missing file fails and gets skipped.
         setlist.refreshMediaAvailability()
         if let id = currentEntryID, earlyMarkedEntryIDs.contains(id) || currentEntryIsPlayed() {
             skipNext()
@@ -949,7 +965,7 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
         pendingOutputRetryID = nextID
     }
 
-    private static func startEngine(_ engine: AVAudioEngine) throws {
+    nonisolated private static func startEngine(_ engine: AVAudioEngine) throws {
         var reason: NSString?
         guard TDTryAudioEngineStart(engine, &reason) else {
             throw PlaybackFailure.track((reason as String?) ?? "Couldn’t start the audio engine.")
@@ -1812,9 +1828,9 @@ final class LocalPlayerSource: NSObject, ObservableObject, MusicPlayerSource {
         }
         // KVO on currentPreset catches V2 AU UIs (e.g. AUGraphicEQ "Flat") that bypass the parameter tree.
         runtime.currentPresetObservation = avUnit.auAudioUnit.observe(\.currentPreset, options: [.new]) {
-            [weak self, weak runtime] _, _ in
+            [weak self] _, _ in
             DispatchQueue.main.async {
-                guard let self, let runtime, !runtime.isApplyingPreset else { return }
+                guard let self, let runtime = self.slotRuntimes[slotId], !runtime.isApplyingPreset else { return }
                 runtime.activePresetID = nil
                 self.slotActivePresetIDs.removeValue(forKey: slotId)
                 self.updateSlotPresetName(slotId: slotId, name: nil)

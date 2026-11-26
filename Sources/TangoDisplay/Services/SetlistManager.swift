@@ -29,6 +29,7 @@ final class SetlistManager: ObservableObject {
     private var preserveSnapshot = false
     private var hasUnsavedChanges = false
     private var missingMediaIDs: Set<UUID> = []
+    private var mediaScanGeneration = 0
     private var playbackErrors: [UUID: String] = [:]
 
     init(storeURL: URL? = nil) {
@@ -120,7 +121,7 @@ final class SetlistManager: ObservableObject {
         stopAfterEntryID = nil
         duplicateSessionDecision = nil
         entries.removeAll()
-        refreshMediaAvailability()
+        applyMediaScan(unreadable: [])
         save()
     }
 
@@ -297,21 +298,27 @@ final class SetlistManager: ObservableObject {
         preserveSnapshot = false
         persistenceError = nil
         entries = decoded
-        refreshMediaAvailability()
-        loadMissingDurations()
-        reloadEmptyMetadata()
-        if !UserDefaults.standard.bool(forKey: "setlistGroupingMigrationV1") {
-            loadMissingGroupings()
+        // These skip entries known to be missing, so start them once the scan has landed.
+        refreshMediaAvailability { [weak self] in
+            guard let self else { return }
+            self.loadMissingDurations()
+            self.reloadEmptyMetadata()
+            if !UserDefaults.standard.bool(forKey: "setlistGroupingMigrationV1") {
+                self.loadMissingGroupings()
+            }
         }
     }
 
     func retryPersistence() {
         guard hasUnsavedChanges else { load(); return }
         do {
-            if let backup = try store.save(entries, preservingSnapshot: preserveSnapshot) {
+            // Back up the unreadable file once; a failed write must not add another copy per retry.
+            if preserveSnapshot {
+                let backup = try store.backupSnapshot()
+                preserveSnapshot = false
                 recoveryNotice = "The previous setlist was saved as \(backup.lastPathComponent)."
             }
-            preserveSnapshot = false
+            try store.save(entries)
             hasUnsavedChanges = false
             persistenceError = nil
         } catch {
@@ -319,10 +326,31 @@ final class SetlistManager: ObservableObject {
         }
     }
 
-    func refreshMediaAvailability() {
+    /// Re-checks every entry's file off the main thread: `isReadableFile` on a sleeping
+    /// external drive blocks while it spins up. `completion` runs on main after the scan,
+    /// even when a newer scan supersedes this one's results.
+    func refreshMediaAvailability(completion: (@MainActor () -> Void)? = nil) {
+        let files = entries.map { ($0.id, $0.fileURL) }
+        mediaScanGeneration += 1
+        let generation = mediaScanGeneration
+        Task { @MainActor [weak self] in
+            let unreadable = await Self.unreadableFiles(files)
+            guard let self else { return }
+            if self.mediaScanGeneration == generation {
+                self.applyMediaScan(unreadable: unreadable)
+            }
+            completion?()
+        }
+    }
+
+    private static func unreadableFiles(_ files: [(UUID, URL)]) async -> Set<UUID> {
+        Set(files.filter { !FileManager.default.isReadableFile(atPath: $0.1.path) }.map(\.0))
+    }
+
+    private func applyMediaScan(unreadable: Set<UUID>) {
         let ids = Set(entries.map(\.id))
         playbackErrors = playbackErrors.filter { ids.contains($0.key) }
-        missingMediaIDs = Set(entries.filter { !FileManager.default.isReadableFile(atPath: $0.fileURL.path) }.map(\.id))
+        missingMediaIDs = unreadable.intersection(ids)
         publishMediaIssues()
     }
 
@@ -336,11 +364,22 @@ final class SetlistManager: ObservableObject {
     }
 
     func retryMedia(id: UUID) {
+        guard let url = entries.first(where: { $0.id == id })?.fileURL else { return }
         playbackErrors[id] = nil
-        refreshMediaAvailability()
-        if mediaIssues[id] == nil {
-            reloadMetadata(ids: [id])
-            loadMissingDurations()
+        publishMediaIssues()
+        Task { @MainActor [weak self] in
+            let readable = await Self.unreadableFiles([(id, url)]).isEmpty
+            guard let self, self.entries.contains(where: { $0.id == id && $0.fileURL == url }) else { return }
+            if readable {
+                self.missingMediaIDs.remove(id)
+            } else {
+                self.missingMediaIDs.insert(id)
+            }
+            self.publishMediaIssues()
+            if readable {
+                self.reloadMetadata(ids: [id])
+                self.loadMissingDurations()
+            }
         }
     }
 
@@ -365,7 +404,8 @@ final class SetlistManager: ObservableObject {
         entries[i].fileURL = url
         entries[i].duration = Double(file.length) / file.fileFormat.sampleRate
         playbackErrors[id] = nil
-        refreshMediaAvailability()
+        missingMediaIDs.remove(id)   // readability checked above
+        publishMediaIssues()
         save()
         Task { @MainActor [weak self] in await self?.reloadMetadata(id: id, force: true) }
     }
