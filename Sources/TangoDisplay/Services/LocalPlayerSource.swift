@@ -24,6 +24,9 @@ final class LocalPlayerSource: NSObject, ObservableObject, @preconcurrency Music
     @Published private(set) var elapsed: Double = 0
     @Published private(set) var duration: Double = 0
     @Published private(set) var currentEntryID: UUID?
+    /// True while the current track is paused in place (resume continues from `elapsed`).
+    /// Distinct from `pause()`, which stops and rewinds the track to its start.
+    @Published private(set) var isHeld = false
     @Published private(set) var isCurrentEntryMarkedAsPlayed: Bool = false
     @Published private(set) var isActivePlaying: Bool = false {
         didSet {
@@ -781,6 +784,10 @@ final class LocalPlayerSource: NSObject, ObservableObject, @preconcurrency Music
     // MARK: - Transport controls
 
     func play() {
+        if isHeld {
+            resumeHeld()
+            return
+        }
         // Non-blocking: a stale result only means a missing file fails and gets skipped.
         setlist.refreshMediaAvailability()
         if let id = currentEntryID, earlyMarkedEntryIDs.contains(id) || currentEntryIsPlayed() {
@@ -802,7 +809,32 @@ final class LocalPlayerSource: NSObject, ObservableObject, @preconcurrency Music
         playForward(from: entry)
     }
 
+    /// Pauses at the current position without rewinding or advancing. The track keeps
+    /// its row and played status; `resumeHeld()` (or `play()`) continues from here.
+    func holdPause() {
+        guard isActivePlaying, audioFile != nil, let id = currentEntryID else { return }
+        scheduleGeneration += 1
+        cancelAutoGapCutoff()
+        playerNode.stop()
+        isActivePlaying = false
+        isHeld = true
+        if !earlyMarkedEntryIDs.contains(id), !currentEntryIsPlayed() {
+            setlist.markPaused(id: id)
+        }
+        // Reschedule from the held position (node stopped, so this doesn't start playback).
+        seekTo(elapsed)
+        reportCurrentState()
+    }
+
+    func resumeHeld() {
+        guard isHeld else { return }
+        isHeld = false
+        manualStopPending = false
+        seekTo(elapsed, resume: true)
+    }
+
     func pause() {
+        isHeld = false
         pendingOutputRetryID = nil
         manualStopPending = true
         scheduleGeneration += 1
@@ -840,6 +872,7 @@ final class LocalPlayerSource: NSObject, ObservableObject, @preconcurrency Music
     }
 
     private func finishPlaybackAttempt() {
+        isHeld = false
         pendingOutputRetryID = nil
         if let id = currentEntryID, let state = setlist.entries.first(where: { $0.id == id })?.state,
            state == .playing || state == .paused {
@@ -1051,6 +1084,7 @@ final class LocalPlayerSource: NSObject, ObservableObject, @preconcurrency Music
                            gapAdjustment: PreparedAutoGap.Adjustment? = nil) throws {
         earlyMarkedEntryIDs.remove(entry.id)
         isCurrentEntryMarkedAsPlayed = false
+        isHeld = false
         scheduleGeneration += 1
         cancelAutoGapCutoff()
         let gen = scheduleGeneration

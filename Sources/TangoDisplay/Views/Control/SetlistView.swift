@@ -1071,8 +1071,7 @@ struct SetlistView: View {
             genreColorRules: settings.genreColorRules,
             genreColorTitleEnabled: settings.genreColorTitleEnabled,
             isCortina: detector.isCortina(genre: entry.track.genre),
-            mediaIssue: setlist.mediaIssues[entry.id],
-            player: activeEntryID == entry.id && isPlayerActive ? player : nil
+            mediaIssue: setlist.mediaIssues[entry.id]
         )
         .tag(entry.id)
         .moveDisabled(entry.state == .playing)
@@ -1779,7 +1778,6 @@ struct SetlistRowView: View {
     var genreColorTitleEnabled: Bool = false
     var isCortina: Bool = false
     var mediaIssue: String? = nil
-    var player: LocalPlayerSource? = nil
 
     private var isCurrent: Bool { entry.state == .playing || entry.state == .paused || isActivelyPlaying }
     private var isCurrentPlaying: Bool { entry.state == .playing || isActivelyPlaying }
@@ -1920,14 +1918,7 @@ struct SetlistRowView: View {
                                    : "Restoration applied to this track")
                 }
             }
-            .padding(.top, 3)
-            .padding(.bottom, isCurrent && player != nil ? 2 : 3)
-
-            if isCurrent, let player = player {
-                RowProgressBarView(player: player, entry: entry)
-                    .padding(.leading, 22)
-                    .padding(.bottom, 5)
-            }
+            .padding(.vertical, 3)
         }
         }
         .contentShape(Rectangle())
@@ -1987,78 +1978,6 @@ struct SetlistRowView: View {
         }
         .font(.system(size: 11))
         .frame(width: 14)
-    }
-}
-
-// MARK: - In-row progress bar
-
-private struct RowProgressBarView: View {
-    @ObservedObject var player: LocalPlayerSource
-    @EnvironmentObject var appState: AppState
-    let entry: SetlistEntry
-
-    var body: some View {
-        let barColor: Color = entry.state == .paused ? .orange : ControlTheme.accent
-        VStack(spacing: 2) {
-            GeometryReader { geo in
-                let progress = player.duration > 0
-                    ? player.elapsed / max(player.duration, 1)
-                    : 0
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color(nsColor: .separatorColor))
-                        .frame(height: 3)
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(barColor)
-                        .frame(width: geo.size.width * progress, height: 3)
-                    let shouldShowPlayed = !appState.settings.markAsPlayedAfterCompletion
-                        && player.duration > 0
-                        && !player.isCurrentEntryMarkedAsPlayed
-                    let playedFraction = min(1.0,
-                        Double(appState.settings.markAsPlayedAfterSeconds) / player.duration)
-                    Rectangle()
-                        .fill(ControlTheme.accent.opacity(0.7))
-                        .frame(width: 2, height: 8)
-                        .position(x: playedFraction * geo.size.width, y: geo.size.height / 2)
-                        .opacity(shouldShowPlayed ? 1 : 0)
-                    let autoFadeDelay: Double = {
-                        guard appState.settings.autoFadeCortinasEnabled,
-                              appState.displayState.mode == .cortina,
-                              player.duration > 0 else { return -1 }
-                        if entry.ignoresAutoFade { return -1 }
-                        let fade = appState.settings.builtInFadeDuration
-                        let play = appState.settings.cortinaPlayTime
-                        let dur = player.duration
-                        if dur > play + fade { return play }
-                        if dur > fade        { return dur - fade }
-                        return -1
-                    }()
-                    Rectangle()
-                        .fill(Color.orange.opacity(0.85))
-                        .frame(width: 2, height: 8)
-                        .position(x: (autoFadeDelay / player.duration) * geo.size.width,
-                                  y: geo.size.height / 2)
-                        .opacity(autoFadeDelay >= 0 ? 1 : 0)
-                }
-                .allowsHitTesting(false)
-            }
-            .frame(height: 16)
-            HStack {
-                Text(formatTime(player.elapsed))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary)
-                Spacer()
-                Text("-\(formatTime(max(0, player.duration - player.elapsed)))")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    private func formatTime(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
-        let s = Int(seconds)
-        return String(format: "%d:%02d", s / 60, s % 60)
     }
 }
 
