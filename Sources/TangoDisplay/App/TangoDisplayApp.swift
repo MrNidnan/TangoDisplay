@@ -75,15 +75,6 @@ struct TangoDisplayApp: App {
         }
         .defaultSize(width: 580, height: 530)
 
-        // Waveform window — shows amplitude waveform for the currently playing track
-        Window("Waveform", id: "waveform") {
-            WaveformWindowContent()
-                .environmentObject(appState)
-                .environmentObject(appState.settings)
-                .preferredColorScheme(.dark)
-        }
-        .defaultSize(width: 700, height: 80)
-
         // Track start & end time editor — trims playback to a sub-range (built-in player only)
         Window("Track start & end time", id: "trackTiming") {
             TrackTimingWindowContent()

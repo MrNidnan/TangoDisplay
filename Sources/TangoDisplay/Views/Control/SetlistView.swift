@@ -813,11 +813,6 @@ struct SetlistView: View {
                         }
                         .help("Audio Unit plugin chain")
                     }
-                    Button { openWindow(id: "waveform") } label: {
-                        Label("Waveform", systemImage: "waveform.path")
-                    }
-                    .disabled(player.currentEntryID == nil)
-                    .help("View waveform for current track")
                 }
             }
             ToolbarItem(placement: .automatic) {
@@ -1016,6 +1011,69 @@ struct SetlistView: View {
         alert.runModal()
     }
 
+    // MARK: - Tanda grouping / folding
+
+    /// Computed over the full setlist so positions don't shift with Hide Played.
+    private func computeTandas(detector: CortinaDetector) -> [UUID: TandaRowInfo] {
+        guard settings.groupByTanda else { return [:] }
+        return TandaGrouping.group(setlist.entries.map {
+            TandaGrouping.Item(id: $0.id, track: $0.track,
+                               isCortina: detector.isCortina(genre: $0.track.genre))
+        })
+    }
+
+    /// The playing tanda never folds, so the current track is always visible.
+    private func currentTandaFirstID(_ tandas: [UUID: TandaRowInfo]) -> UUID? {
+        let currentID = activeEntryID
+            ?? setlist.entries.first(where: { $0.state == .playing || $0.state == .paused })?.id
+        return currentID.flatMap { tandas[$0]?.summary.firstID }
+    }
+
+    /// Option-click folds/unfolds every tanda at once.
+    private func toggleTanda(_ firstID: UUID?, all: Bool) {
+        guard let firstID else { return }
+        let folding = !setlist.collapsedTandaIDs.contains(firstID)
+        withAnimation(.easeInOut(duration: 0.15)) {
+            if all {
+                let tandas = computeTandas(detector: settings.makeDetector())
+                let current = currentTandaFirstID(tandas)
+                setlist.collapsedTandaIDs = folding
+                    ? Set(tandas.values.map(\.summary.firstID)).subtracting([current].compactMap { $0 })
+                    : []
+            } else if folding {
+                setlist.collapsedTandaIDs.insert(firstID)
+            } else {
+                setlist.collapsedTandaIDs.remove(firstID)
+            }
+        }
+        // Drop selection on rows that just got hidden, so Delete can't hit invisible tracks.
+        if folding {
+            let tandas = computeTandas(detector: settings.makeDetector())
+            selectedIDs = selectedIDs.filter { id in
+                guard let first = tandas[id]?.summary.firstID,
+                      setlist.collapsedTandaIDs.contains(first) else { return true }
+                return id == first
+            }
+        }
+    }
+
+    /// A folded tanda's row stands for the whole tanda, so deleting it deletes every
+    /// visible track in that tanda (undoable).
+    private func expandFoldedTandas(_ ids: Set<UUID>) -> Set<UUID> {
+        guard !setlist.collapsedTandaIDs.isEmpty else { return ids }
+        let tandas = computeTandas(detector: settings.makeDetector())
+        let current = currentTandaFirstID(tandas)
+        let folded = Set(ids.compactMap { tandas[$0]?.summary.firstID })
+            .intersection(setlist.collapsedTandaIDs)
+            .subtracting([current].compactMap { $0 })
+        guard !folded.isEmpty else { return ids }
+        let extra = setlist.entries.filter { entry in
+            guard let first = tandas[entry.id]?.summary.firstID, folded.contains(first) else { return false }
+            return !settings.hidePlayed || entry.state != .played || entry.id == activeEntryID
+        }.map(\.id)
+        return ids.union(extra)
+    }
+
     // MARK: - Undo (delete / reorder)
 
     private struct UndoToast: Equatable {
@@ -1026,6 +1084,7 @@ struct SetlistView: View {
     /// Deleting the playing/paused row stops the music, which undo can't bring back,
     /// so only that case still asks first. Everything else deletes at once with undo.
     private func requestDelete(_ ids: Set<UUID>) {
+        let ids = expandFoldedTandas(ids)
         guard !ids.isEmpty else { return }
         let touchesCurrent = setlist.entries.contains {
             ids.contains($0.id) && ($0.state == .playing || $0.state == .paused
@@ -1190,14 +1249,13 @@ struct SetlistView: View {
             isCortina: detector.isCortina(genre: entry.track.genre),
             mediaIssue: setlist.mediaIssues[entry.id],
             tanda: tanda,
-            tandaHeader: tandaHeader
+            tandaHeader: tandaHeader,
+            onDoubleClick: { player.jumpTo(entry) },
+            onToggleTanda: { allTandas in toggleTanda(tandaHeader?.summary.firstID, all: allTandas) }
         )
         .tag(entry.id)
-        .moveDisabled(entry.state == .playing)
-        // NSViewRepresentable overlay handles double-click without adding any
-        // SwiftUI gesture recognizer — keeping NSTableView's primary click
-        // handler free to process single/multi-selection.
-        .overlay(DoubleClickOverlay { player.jumpTo(entry) })
+        // A folded tanda's row stands for the whole tanda — don't let it move one track.
+        .moveDisabled(entry.state == .playing || tandaHeader?.isCollapsed == true)
         .contextMenu {
             let targets: Set<UUID> = selectedIDs.contains(entry.id)
                 ? selectedIDs : [entry.id]
@@ -1208,7 +1266,7 @@ struct SetlistView: View {
     private var trackList: some View {
         let firstID = setlist.entries.first?.id
         let nonePlayedYet = !setlist.entries.contains(where: { $0.state == .played })
-        let entries = settings.hidePlayed
+        let visibleEntries = settings.hidePlayed
             ? setlist.entries.filter { $0.state != .played || $0.id == activeEntryID }
             : setlist.entries
         // Live flag is part of row identity: NSTableView doesn't always re-measure a
@@ -1217,24 +1275,39 @@ struct SetlistView: View {
         // Selection is unaffected — it keys off .tag(entry.id).
         let liveID = isPlayerActive ? activeEntryID : nil
         let detector = settings.makeDetector()
-        // Tandas are computed over the full setlist so positions don't shift with Hide Played;
-        // the header goes on the first *visible* row of each tanda.
-        let tandas: [UUID: TandaRowInfo] = settings.groupByTanda
-            ? TandaGrouping.group(setlist.entries.map {
-                TandaGrouping.Item(id: $0.id, track: $0.track,
-                                   isCortina: detector.isCortina(genre: $0.track.genre))
-              })
-            : [:]
-        let currentID = activeEntryID
-            ?? setlist.entries.first(where: { $0.state == .playing || $0.state == .paused })?.id
-        let currentTanda = currentID.flatMap { tandas[$0] }
+        let tandas = computeTandas(detector: detector)
+        let currentFirstID = currentTandaFirstID(tandas)
         var headers: [UUID: TandaHeaderInfo] = [:]
         var seenTandas: Set<UUID> = []
-        for entry in entries {
+        var durations: [UUID: Double] = [:]
+        for entry in setlist.entries {
+            if let first = tandas[entry.id]?.summary.firstID, let d = entry.duration {
+                durations[first, default: 0] += d
+            }
+        }
+        let currentPosition = (activeEntryID ?? setlist.entries.first {
+            $0.state == .playing || $0.state == .paused
+        }?.id).flatMap { tandas[$0]?.position }
+        // Header goes on the first *visible* row of each tanda (Hide Played may hide earlier ones).
+        for entry in visibleEntries {
             guard let info = tandas[entry.id], seenTandas.insert(info.summary.firstID).inserted else { continue }
-            let playingPosition = currentTanda?.summary.firstID == info.summary.firstID
-                ? currentTanda?.position : nil
-            headers[entry.id] = TandaHeaderInfo(summary: info.summary, playingPosition: playingPosition)
+            let first = info.summary.firstID
+            let isCurrent = first == currentFirstID
+            headers[entry.id] = TandaHeaderInfo(
+                summary: info.summary,
+                playingPosition: isCurrent ? currentPosition : nil,
+                duration: durations[first],
+                isCollapsed: !isCurrent && setlist.collapsedTandaIDs.contains(first),
+                canCollapse: !isCurrent
+            )
+        }
+        // Folded tandas keep only their header row.
+        // `entries` is exactly what the ForEach renders — onMove/onDelete/onInsert offsets index it.
+        let entries = visibleEntries.filter { entry in
+            guard let first = tandas[entry.id]?.summary.firstID,
+                  first != currentFirstID,
+                  setlist.collapsedTandaIDs.contains(first) else { return true }
+            return headers[entry.id] != nil
         }
         // Header presence is part of identity too — it changes the row height.
         let rows = entries.map {
@@ -1841,6 +1914,9 @@ struct TandaHeaderInfo: Equatable {
     let summary: TandaSummary
     /// Position of the playing track when this tanda is the current one.
     let playingPosition: Int?
+    var duration: Double? = nil
+    var isCollapsed: Bool = false
+    var canCollapse: Bool = true
 }
 
 /// Faint header on the first visible row of each tanda:
@@ -1848,12 +1924,29 @@ struct TandaHeaderInfo: Equatable {
 /// when the tanda mixes orchestras. Mixed genres / decades get soft badges.
 struct TandaHeaderView: View {
     let info: TandaHeaderInfo
+    var onToggle: ((_ all: Bool) -> Void)? = nil
 
     private static let warn = Color.orange
 
     var body: some View {
         let s = info.summary
         HStack(spacing: 6) {
+            Button {
+                onToggle?(NSEvent.modifierFlags.contains(.option))
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .rotationEffect(.degrees(info.isCollapsed ? 0 : 90))
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .opacity(info.canCollapse ? 1 : 0.25)
+            .disabled(!info.canCollapse || onToggle == nil)
+            .help(info.canCollapse ? (info.isCollapsed ? "Unfold tanda (⌥-click: all)" : "Fold tanda (⌥-click: all)")
+                                   : "Playing tanda stays open")
+
             Rectangle()
                 .fill(s.isMixed ? Self.warn.opacity(0.7) : Color.secondary.opacity(0.35))
                 .frame(width: 2, height: 11)
@@ -1883,14 +1976,19 @@ struct TandaHeaderView: View {
                 .fill(Color.secondary.opacity(0.18))
                 .frame(height: 1)
         }
-        .padding(.leading, 22)
-        .accessibilityElement(children: .combine)
+        .padding(.leading, 6)
+        .accessibilityElement(children: .contain)
     }
 
     private var countText: String {
         let total = info.summary.count
         if let pos = info.playingPosition { return "\(pos)/\(total)" }
-        return total == 1 ? "1 track" : "\(total) tracks"
+        var text = total == 1 ? "1 track" : "\(total) tracks"
+        if info.isCollapsed, let d = info.duration, d > 0 {
+            let s = Int(d.rounded())
+            text += String(format: " · %d:%02d", s / 60, s % 60)
+        }
+        return text
     }
 
     private func badge(_ what: String) -> some View {
@@ -1998,6 +2096,10 @@ struct SetlistRowView: View {
     var mediaIssue: String? = nil
     var tanda: TandaRowInfo? = nil
     var tandaHeader: TandaHeaderInfo? = nil
+    var onDoubleClick: (() -> Void)? = nil
+    var onToggleTanda: ((_ all: Bool) -> Void)? = nil
+
+    private var isFolded: Bool { tandaHeader?.isCollapsed == true }
 
     private var isCurrent: Bool { entry.state == .playing || entry.state == .paused || isActivelyPlaying }
     private var isCurrentPlaying: Bool { entry.state == .playing || isActivelyPlaying }
@@ -2014,12 +2116,22 @@ struct SetlistRowView: View {
 
         VStack(spacing: 0) {
             if let tandaHeader {
-                TandaHeaderView(info: tandaHeader)
+                TandaHeaderView(info: tandaHeader, onToggle: onToggleTanda)
                     .padding(.top, 6)
-                    .padding(.bottom, 2)
+                    .padding(.bottom, isFolded ? 6 : 2)
             }
+            if !isFolded {
             HStack(spacing: 8) {
                 stateIndicator
+
+                if let tanda {
+                    Text("\(tanda.position)/\(tanda.total)")
+                        .font(.system(size: 10, weight: tanda.isLast ? .bold : .regular, design: .monospaced))
+                        .foregroundColor(tanda.isLast && isCurrent ? .orange : .secondary)
+                        .frame(width: 26, alignment: .leading)
+                        .help(tanda.isLast ? "Last track of the tanda — cortina next"
+                                           : "Track \(tanda.position) of \(tanda.total) in this tanda")
+                }
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(entry.track.title)
@@ -2051,14 +2163,6 @@ struct SetlistRowView: View {
                         .foregroundStyle(.orange)
                         .help(mediaIssue)
                         .accessibilityLabel(mediaIssue)
-                }
-
-                if let tanda {
-                    Text("\(tanda.position)/\(tanda.total)")
-                        .font(.system(size: 10, weight: tanda.isLast ? .bold : .regular, design: .monospaced))
-                        .foregroundColor(tanda.isLast && isCurrent ? .orange : .secondary)
-                        .help(tanda.isLast ? "Last track of the tanda — cortina next"
-                                           : "Track \(tanda.position) of \(tanda.total) in this tanda")
                 }
 
                 if showTime, let dur = entry.duration {
@@ -2152,6 +2256,12 @@ struct SetlistRowView: View {
                 }
             }
             .padding(.vertical, 3)
+            // NSViewRepresentable overlay handles double-click without adding any
+            // SwiftUI gesture recognizer — keeping NSTableView's primary click
+            // handler free to process single/multi-selection. Scoped to the track
+            // content so the tanda header's fold button stays clickable.
+            .overlay(DoubleClickOverlay { onDoubleClick?() })
+            }
         }
         }
         .contentShape(Rectangle())

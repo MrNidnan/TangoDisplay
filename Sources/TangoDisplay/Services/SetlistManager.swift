@@ -31,6 +31,8 @@ final class SetlistManager: ObservableObject {
     @Published private(set) var mediaIssues: [UUID: String] = [:]
     @Published private(set) var persistenceError: String?
     @Published private(set) var recoveryNotice: String?
+    /// Tandas folded in the setlist view, keyed by the tanda's first entry ID. Session-only.
+    @Published var collapsedTandaIDs: Set<UUID> = []
     private(set) var duplicateSessionDecision: DuplicateSessionDecision? = nil
 
     func setDuplicateSessionDecision(_ decision: DuplicateSessionDecision?) {
