@@ -2067,6 +2067,7 @@ final class LocalPlayerSource: NSObject, ObservableObject, @preconcurrency Music
                 }
                 if let id = self.currentEntryID,
                    !entries.contains(where: { $0.id == id }) {
+                    self.isHeld = false
                     self.scheduleGeneration += 1
                     self.currentEntryID = nil
                     self.isActivePlaying = false

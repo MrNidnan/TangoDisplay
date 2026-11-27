@@ -332,6 +332,10 @@ final class AppSettings: ObservableObject {
         didSet { UserDefaults.standard.set(hidePlayed, forKey: kPrefix + "hidePlayed") }
     }
 
+    @Published var groupByTanda: Bool {
+        didSet { UserDefaults.standard.set(groupByTanda, forKey: kPrefix + "groupByTanda") }
+    }
+
     // MARK: - Startup
 
     @Published var startupMode: StartupMode {
@@ -505,6 +509,7 @@ final class AppSettings: ObservableObject {
         decibelMeterLowThreshold  = ud.object(forKey: kPrefix + "decibelMeterLowThreshold").flatMap { $0 as? Int } ?? 60
         decibelMeterHighThreshold = ud.object(forKey: kPrefix + "decibelMeterHighThreshold").flatMap { $0 as? Int } ?? 80
         hidePlayed = ud.object(forKey: kPrefix + "hidePlayed").flatMap { $0 as? Bool } ?? false
+        groupByTanda = ud.object(forKey: kPrefix + "groupByTanda").flatMap { $0 as? Bool } ?? true
         let rawStartup = ud.string(forKey: kPrefix + "startupMode") ?? ""
         startupMode = StartupMode(rawValue: rawStartup) ?? .fullExperience
         hideLeftMenuBarOnStartup = ud.object(forKey: kPrefix + "hideLeftMenuBarOnStartup")

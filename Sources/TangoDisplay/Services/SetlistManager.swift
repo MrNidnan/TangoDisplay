@@ -9,6 +9,22 @@ import TangoDisplayTagging
 
 enum DuplicateSessionDecision { case alwaysAdd, neverAdd }
 
+/// Everything needed to put deleted rows back where they were.
+struct SetlistRemoval {
+    /// Removed entries in original order, each with the surviving entry that followed it.
+    fileprivate let items: [(entry: SetlistEntry, anchorID: UUID?)]
+    fileprivate let stopAfterID: UUID?
+    var ids: Set<UUID> { Set(items.map(\.entry.id)) }
+    var count: Int { items.count }
+}
+
+/// Setlist order before a reorder, plus each row's state so the undo can refuse
+/// once playback has moved on (restoring an old order then would scramble the set).
+struct SetlistReorder {
+    fileprivate let order: [UUID]
+    fileprivate let states: [UUID: SetlistEntryState]
+}
+
 final class SetlistManager: ObservableObject {
     @Published private(set) var entries: [SetlistEntry] = []
     @Published var stopAfterEntryID: UUID?
@@ -95,15 +111,52 @@ final class SetlistManager: ObservableObject {
         loadMissingDurations()
     }
 
-    func remove(at offsets: IndexSet) {
-        if let stopID = stopAfterEntryID, offsets.map({ entries[$0].id }).contains(stopID) {
-            stopAfterEntryID = nil
-        }
-        entries.remove(atOffsets: offsets)
-        save()
+    @discardableResult
+    func remove(at offsets: IndexSet) -> SetlistRemoval? {
+        remove(ids: Set(offsets.compactMap { entries.indices.contains($0) ? entries[$0].id : nil }))
     }
 
-    func move(from source: IndexSet, to destination: Int) {
+    /// Re-inserts rows removed by `remove(ids:)`. Returns false (and changes nothing)
+    /// if any of them is back in the setlist already.
+    @discardableResult
+    func restore(_ removal: SetlistRemoval) -> Bool {
+        let present = Set(entries.map(\.id))
+        guard !removal.items.isEmpty, removal.ids.isDisjoint(with: present) else { return false }
+        for item in removal.items {
+            var entry = item.entry
+            // Deleting the current row stopped playback — it comes back as queued.
+            if entry.state == .playing || entry.state == .paused { entry.state = .queued }
+            let index = item.anchorID.flatMap { id in entries.firstIndex(where: { $0.id == id }) }
+                ?? entries.count
+            entries.insert(entry, at: index)
+        }
+        if stopAfterEntryID == nil, let stopID = removal.stopAfterID { stopAfterEntryID = stopID }
+        save()
+        loadMissingDurations()
+        refreshMediaAvailability()
+        return true
+    }
+
+    private func reorderSnapshot() -> SetlistReorder {
+        SetlistReorder(order: entries.map(\.id),
+                       states: Dictionary(entries.map { ($0.id, $0.state) }, uniquingKeysWith: { a, _ in a }))
+    }
+
+    /// Puts the setlist back in the order captured by `move`. Returns the order it
+    /// replaced (for redo), or nil if rows were added/removed or any row's playback
+    /// state changed since.
+    @discardableResult
+    func revert(_ reorder: SetlistReorder) -> SetlistReorder? {
+        let current = reorderSnapshot()
+        guard current.states == reorder.states, current.order != reorder.order else { return nil }
+        let byID = Dictionary(entries.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        entries = reorder.order.compactMap { byID[$0] }
+        save()
+        return current
+    }
+
+    @discardableResult
+    func move(from source: IndexSet, to destination: Int) -> SetlistReorder? {
         // Filter out played/playing entries — they cannot be reordered.
         // Using filter (not reject) handles the case where a playing track is
         // selected alongside queued tracks and SwiftUI includes all selected
@@ -112,9 +165,12 @@ final class SetlistManager: ObservableObject {
             let s = entries[$0].state
             return s == .queued || s == .paused
         })
-        guard !movable.isEmpty else { return }
+        guard !movable.isEmpty else { return nil }
+        let before = reorderSnapshot()
         entries.move(fromOffsets: movable, toOffset: destination)
+        guard entries.map(\.id) != before.order else { return nil }
         save()
+        return before
     }
 
     func clear() {
@@ -250,12 +306,19 @@ final class SetlistManager: ObservableObject {
         entries[i].autoGapApplied = applied
     }
 
-    func remove(ids: Set<UUID>) {
-        if let stopID = stopAfterEntryID, ids.contains(stopID) {
-            stopAfterEntryID = nil
+    @discardableResult
+    func remove(ids: Set<UUID>) -> SetlistRemoval? {
+        var items: [(entry: SetlistEntry, anchorID: UUID?)] = []
+        for (i, entry) in entries.enumerated() where ids.contains(entry.id) {
+            let anchor = entries[(i + 1)...].first { !ids.contains($0.id) }?.id
+            items.append((entry, anchor))
         }
+        guard !items.isEmpty else { return nil }
+        let removedStop = stopAfterEntryID.flatMap { ids.contains($0) ? $0 : nil }
+        if removedStop != nil { stopAfterEntryID = nil }
         entries.removeAll { ids.contains($0.id) }
         save()
+        return SetlistRemoval(items: items, stopAfterID: removedStop)
     }
 
     func entry(after id: UUID) -> SetlistEntry? {

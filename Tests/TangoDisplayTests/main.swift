@@ -1264,6 +1264,7 @@ runAudioUnitPluginTests()
 runRestorationTests()
 runSliderSnapTests()
 runUpcomingOverrideTests()
+runTandaGroupingTests()
 await runTagWriterTests()
 
 print("\n════════════════════════════════")

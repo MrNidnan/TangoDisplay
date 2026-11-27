@@ -521,6 +521,7 @@ struct SetlistView: View {
     @EnvironmentObject var reportStore: SetlistReportStore
     @EnvironmentObject var configStore: PluginConfigurationStore
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.undoManager) private var undoManager
     @State private var isDragTargeted = false
     @State private var activeEntryID: UUID? = nil
     @State private var isPlayerActive: Bool = false
@@ -552,6 +553,7 @@ struct SetlistView: View {
     @State private var engineStalledAlertShown = false
     @State private var relinkError: String?
     @State private var dropFeedback: String? = nil
+    @State private var undoToast: UndoToast? = nil
 
     // Seed the @State mirrors from the player so the very first body render
     // after this view is (re-)created already reflects the live playing track.
@@ -820,6 +822,15 @@ struct SetlistView: View {
             }
             ToolbarItem(placement: .automatic) {
                 Button {
+                    settings.groupByTanda.toggle()
+                } label: {
+                    Label("Group by Tanda", systemImage: settings.groupByTanda ? "rectangle.stack.fill" : "rectangle.stack")
+                }
+                .disabled(setlist.entries.isEmpty)
+                .help(settings.groupByTanda ? "Hide tanda grouping" : "Group tracks by tanda")
+            }
+            ToolbarItem(placement: .automatic) {
+                Button {
                     settings.hidePlayed.toggle()
                     let target = activeEntryID
                         ?? setlist.entries.first(where: { $0.state != .played })?.id
@@ -843,7 +854,11 @@ struct SetlistView: View {
             isPresented: $showClearConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Clear", role: .destructive) { setlist.clear() }
+            Button("Clear", role: .destructive) {
+                setlist.clear()
+                undoManager?.removeAllActions(withTarget: setlist)
+                undoToast = nil
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
             if isPlayerActive {
@@ -862,9 +877,8 @@ struct SetlistView: View {
         ) {
             Button("Delete", role: .destructive) {
                 if let ids = pendingDeleteIDs {
-                    setlist.remove(ids: ids)
-                    selectedIDs.subtract(ids)
                     pendingDeleteIDs = nil
+                    performDelete(ids)
                 }
             }
             Button("Cancel", role: .cancel) { pendingDeleteIDs = nil }
@@ -1002,6 +1016,108 @@ struct SetlistView: View {
         alert.runModal()
     }
 
+    // MARK: - Undo (delete / reorder)
+
+    private struct UndoToast: Equatable {
+        let id = UUID()
+        let message: String
+    }
+
+    /// Deleting the playing/paused row stops the music, which undo can't bring back,
+    /// so only that case still asks first. Everything else deletes at once with undo.
+    private func requestDelete(_ ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        let touchesCurrent = setlist.entries.contains {
+            ids.contains($0.id) && ($0.state == .playing || $0.state == .paused
+                                    || (isPlayerActive && $0.id == activeEntryID))
+        }
+        if touchesCurrent {
+            pendingDeleteIDs = ids
+        } else {
+            performDelete(ids)
+        }
+    }
+
+    private func performDelete(_ ids: Set<UUID>) {
+        guard let removal = setlist.remove(ids: ids) else { return }
+        selectedIDs.subtract(ids)
+        registerDeleteUndo(removal)
+        showUndoToast(removal.count == 1 ? "Deleted track" : "Deleted \(removal.count) tracks")
+    }
+
+    private func registerDeleteUndo(_ removal: SetlistRemoval) {
+        guard let undoManager else { return }
+        Self.registerDelete(removal, on: setlist, undoManager: undoManager)
+    }
+
+    private static func registerDelete(_ removal: SetlistRemoval, on setlist: SetlistManager,
+                                       undoManager: UndoManager) {
+        undoManager.registerUndo(withTarget: setlist) { target in
+            guard target.restore(removal) else { NSSound.beep(); return }
+            // Redo: delete the same rows again, re-arming undo.
+            undoManager.registerUndo(withTarget: target) { again in
+                guard let redo = again.remove(ids: removal.ids) else { NSSound.beep(); return }
+                registerDelete(redo, on: again, undoManager: undoManager)
+            }
+            undoManager.setActionName(deleteActionName(removal.count))
+        }
+        undoManager.setActionName(deleteActionName(removal.count))
+    }
+
+    private static func deleteActionName(_ count: Int) -> String {
+        count == 1 ? "Delete Track" : "Delete Tracks"
+    }
+
+    private func registerReorderUndo(_ before: SetlistReorder) {
+        guard let undoManager else { return }
+        Self.registerReorder(before, on: setlist, undoManager: undoManager)
+    }
+
+    private static func registerReorder(_ order: SetlistReorder, on setlist: SetlistManager,
+                                        undoManager: UndoManager) {
+        undoManager.registerUndo(withTarget: setlist) { target in
+            guard let redo = target.revert(order) else {
+                NSSound.beep()   // playback moved on — old order no longer safe to restore
+                return
+            }
+            registerReorder(redo, on: target, undoManager: undoManager)
+        }
+        undoManager.setActionName("Move Tracks")
+    }
+
+    private func showUndoToast(_ message: String) {
+        let toast = UndoToast(message: message)
+        withAnimation { undoToast = toast }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(5))
+            if undoToast?.id == toast.id { withAnimation { undoToast = nil } }
+        }
+    }
+
+    private func undoToastView(_ toast: UndoToast) -> some View {
+        HStack(spacing: 10) {
+            Text(toast.message)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            Button {
+                withAnimation { undoToast = nil }
+                undoManager?.undo()
+            } label: {
+                Text("Undo ⌘Z")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.accentColor)
+            }
+            .buttonStyle(.plain)
+            .disabled(undoManager?.canUndo != true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial)
+        .clipShape(Capsule())
+        .padding(.bottom, 8)
+        .transition(.opacity)
+    }
+
     // Brief auto-dismissing note in the bottom drop-hint slot, so silently
     // filtered duplicates aren't misread as a failed drag.
     private func showDropFeedback(_ message: String) {
@@ -1050,8 +1166,9 @@ struct SetlistView: View {
     }
 
     @ViewBuilder
-    private func rowView(for entry: SetlistEntry, wouldSkipAutoGap: Bool) -> some View {
-        let detector = settings.makeDetector()
+    private func rowView(for entry: SetlistEntry, wouldSkipAutoGap: Bool,
+                         detector: CortinaDetector, tanda: TandaRowInfo?,
+                         tandaHeader: TandaHeaderInfo?) -> some View {
         SetlistRowView(
             entry: entry,
             isStopAfter: entry.id == setlist.stopAfterEntryID
@@ -1071,7 +1188,9 @@ struct SetlistView: View {
             genreColorRules: settings.genreColorRules,
             genreColorTitleEnabled: settings.genreColorTitleEnabled,
             isCortina: detector.isCortina(genre: entry.track.genre),
-            mediaIssue: setlist.mediaIssues[entry.id]
+            mediaIssue: setlist.mediaIssues[entry.id],
+            tanda: tanda,
+            tandaHeader: tandaHeader
         )
         .tag(entry.id)
         .moveDisabled(entry.state == .playing)
@@ -1097,14 +1216,38 @@ struct SetlistView: View {
         // "not played"), leaving it clipped. A new identity forces a fresh row.
         // Selection is unaffected — it keys off .tag(entry.id).
         let liveID = isPlayerActive ? activeEntryID : nil
-        let rows = entries.map { (entry: $0, key: "\($0.id)-\($0.id == liveID)") }
+        let detector = settings.makeDetector()
+        // Tandas are computed over the full setlist so positions don't shift with Hide Played;
+        // the header goes on the first *visible* row of each tanda.
+        let tandas: [UUID: TandaRowInfo] = settings.groupByTanda
+            ? TandaGrouping.group(setlist.entries.map {
+                TandaGrouping.Item(id: $0.id, track: $0.track,
+                                   isCortina: detector.isCortina(genre: $0.track.genre))
+              })
+            : [:]
+        let currentID = activeEntryID
+            ?? setlist.entries.first(where: { $0.state == .playing || $0.state == .paused })?.id
+        let currentTanda = currentID.flatMap { tandas[$0] }
+        var headers: [UUID: TandaHeaderInfo] = [:]
+        var seenTandas: Set<UUID> = []
+        for entry in entries {
+            guard let info = tandas[entry.id], seenTandas.insert(info.summary.firstID).inserted else { continue }
+            let playingPosition = currentTanda?.summary.firstID == info.summary.firstID
+                ? currentTanda?.position : nil
+            headers[entry.id] = TandaHeaderInfo(summary: info.summary, playingPosition: playingPosition)
+        }
+        // Header presence is part of identity too — it changes the row height.
+        let rows = entries.map {
+            (entry: $0, key: "\($0.id)-\($0.id == liveID)-\(headers[$0.id] != nil)")
+        }
         return List(selection: $selectedIDs) {
             ForEach(rows, id: \.key) { row in
                 let entry = row.entry
                 let autoGapIgnored = settings.autoGapEnabled &&
                     entry.autoGapIgnored(isFirstTrack: nonePlayedYet && entry.id == firstID,
                                          ignoreFirstTrack: settings.autoGapIgnoreFirstTrack)
-                rowView(for: entry, wouldSkipAutoGap: autoGapIgnored)
+                rowView(for: entry, wouldSkipAutoGap: autoGapIgnored, detector: detector,
+                        tanda: tandas[entry.id], tandaHeader: headers[entry.id])
             }
             .onMove { source, dest in
                 // The ForEach iterates `entries` (filtered when Hide Played is on),
@@ -1121,11 +1264,14 @@ struct SetlistView: View {
                 } else {
                     masterDest = setlist.entries.count
                 }
-                setlist.move(from: masterSource, to: masterDest)
+                if let before = setlist.move(from: masterSource, to: masterDest) {
+                    registerReorderUndo(before)
+                    let n = sourceIDs.count
+                    showUndoToast(n == 1 ? "Moved track" : "Moved \(n) tracks")
+                }
             }
             .onDelete { offsets in
-                let ids = Set(offsets.compactMap { entries[safe: $0]?.id })
-                pendingDeleteIDs = ids
+                requestDelete(Set(offsets.compactMap { entries[safe: $0]?.id }))
             }
             .onInsert(of: [.fileURL]) { offset, providers in
                 // Convert the integer offset to a stable UUID anchor immediately,
@@ -1143,7 +1289,9 @@ struct SetlistView: View {
         }
         .listStyle(.plain)
         .overlay(alignment: .bottom) {
-            if let dropFeedback {
+            if let undoToast {
+                undoToastView(undoToast)
+            } else if let dropFeedback {
                 Text(dropFeedback)
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
@@ -1341,7 +1489,7 @@ struct SetlistView: View {
             }
         }
         Divider()
-        Button("Delete", role: .destructive) { pendingDeleteIDs = targets }
+        Button("Delete", role: .destructive) { requestDelete(targets) }
     }
 
     private func relink(_ entry: SetlistEntry) {
@@ -1687,6 +1835,76 @@ private struct StatusBarView: View {
 
 // MARK: - Double-click overlay
 
+// MARK: - Tanda header
+
+struct TandaHeaderInfo: Equatable {
+    let summary: TandaSummary
+    /// Position of the playing track when this tanda is the current one.
+    let playingPosition: Int?
+}
+
+/// Faint header on the first visible row of each tanda:
+/// "D'Arienzo · Tango · 4 tracks", or "MIX · Tango · 2/4" (MIX in warning colour)
+/// when the tanda mixes orchestras. Mixed genres / decades get soft badges.
+struct TandaHeaderView: View {
+    let info: TandaHeaderInfo
+
+    private static let warn = Color.orange
+
+    var body: some View {
+        let s = info.summary
+        HStack(spacing: 6) {
+            Rectangle()
+                .fill(s.isMixed ? Self.warn.opacity(0.7) : Color.secondary.opacity(0.35))
+                .frame(width: 2, height: 11)
+
+            if s.mixedOrchestra {
+                Text("MIX")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(Self.warn)
+                    .help("This tanda mixes orchestras")
+            } else if let orchestra = s.orchestra {
+                Text(orchestra)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+
+            let parts = [s.genre.isEmpty ? nil : s.genre, countText].compactMap { $0 }
+            Text(((s.mixedOrchestra || s.orchestra != nil) ? "· " : "") + parts.joined(separator: " · "))
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+
+            if s.mixedGenre { badge("genres") }
+            if s.mixedDecade { badge("decades") }
+
+            Rectangle()
+                .fill(Color.secondary.opacity(0.18))
+                .frame(height: 1)
+        }
+        .padding(.leading, 22)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var countText: String {
+        let total = info.summary.count
+        if let pos = info.playingPosition { return "\(pos)/\(total)" }
+        return total == 1 ? "1 track" : "\(total) tracks"
+    }
+
+    private func badge(_ what: String) -> some View {
+        Text("mixed \(what)")
+            .font(.system(size: 9, weight: .medium))
+            .foregroundColor(Self.warn)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Self.warn.opacity(0.12))
+            .clipShape(Capsule())
+            .help("This tanda mixes \(what)")
+    }
+}
+
 // Uses NSClickGestureRecognizer with delaysPrimaryMouseButtonEvents = false so
 // NSTableView receives primary clicks unobstructed (enabling mouse selection),
 // while still detecting double-clicks to jump to a track.
@@ -1778,6 +1996,8 @@ struct SetlistRowView: View {
     var genreColorTitleEnabled: Bool = false
     var isCortina: Bool = false
     var mediaIssue: String? = nil
+    var tanda: TandaRowInfo? = nil
+    var tandaHeader: TandaHeaderInfo? = nil
 
     private var isCurrent: Bool { entry.state == .playing || entry.state == .paused || isActivelyPlaying }
     private var isCurrentPlaying: Bool { entry.state == .playing || isActivelyPlaying }
@@ -1793,6 +2013,11 @@ struct SetlistRowView: View {
                 .frame(width: 3)
 
         VStack(spacing: 0) {
+            if let tandaHeader {
+                TandaHeaderView(info: tandaHeader)
+                    .padding(.top, 6)
+                    .padding(.bottom, 2)
+            }
             HStack(spacing: 8) {
                 stateIndicator
 
@@ -1826,6 +2051,14 @@ struct SetlistRowView: View {
                         .foregroundStyle(.orange)
                         .help(mediaIssue)
                         .accessibilityLabel(mediaIssue)
+                }
+
+                if let tanda {
+                    Text("\(tanda.position)/\(tanda.total)")
+                        .font(.system(size: 10, weight: tanda.isLast ? .bold : .regular, design: .monospaced))
+                        .foregroundColor(tanda.isLast && isCurrent ? .orange : .secondary)
+                        .help(tanda.isLast ? "Last track of the tanda — cortina next"
+                                           : "Track \(tanda.position) of \(tanda.total) in this tanda")
                 }
 
                 if showTime, let dur = entry.duration {
