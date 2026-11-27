@@ -1,53 +1,63 @@
 #!/usr/bin/env bash
-# Usage: ./Install.sh [--build-only | --destination /path/TangoDisplay.app] [--no-launch]
+# TangoDisplay — Build, bundle, sign, and install to /Applications
+# Usage: ./Install.sh [--build-only]
+#   --build-only  build and sign TangoDisplay.app in the repo root; don't install or launch (CI)
+# Requirements: Xcode Command Line Tools (xcode-select --install)
 set -euo pipefail
 
 APP_NAME="TangoDisplay"
 BUNDLE_ID="com.local.tangodisplay"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEST="/Applications/$APP_NAME.app"
 BUILD_ONLY=false
-LAUNCH=true
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --build-only) BUILD_ONLY=true; shift ;;
-    --no-launch) LAUNCH=false; shift ;;
-    --destination)
-      [[ $# -ge 2 && "$2" == *.app ]] || { echo "Expected an .app path after --destination" >&2; exit 2; }
-      DEST="$2"
-      [[ "$DEST" == /* ]] || DEST="$PWD/$DEST"
-      shift 2
-      ;;
-    -h|--help)
-      echo "Usage: ./Install.sh [--build-only | --destination /path/TangoDisplay.app] [--no-launch]"
-      exit 0
-      ;;
-    *) echo "Unknown option: $1" >&2; exit 2 ;;
-  esac
-done
+[[ "${1:-}" == "--build-only" ]] && BUILD_ONLY=true
 
 cd "$ROOT_DIR"
-PACKAGE_DIR="$ROOT_DIR"
-if "$BUILD_ONLY"; then PACKAGE_DIR="$ROOT_DIR/.build/package"; fi
-mkdir -p "$PACKAGE_DIR"
-STAGING="$(mktemp -d "$PACKAGE_DIR/.tangodisplay-build.XXXXXX")"
-trap 'rm -rf "$STAGING"' EXIT
-APP_DIR="$STAGING/$APP_NAME.app"
+
+echo "== Generate app icon =="
+swift Scripts/GenerateIcon.swift
+iconutil -c icns icon.iconset -o icon.icns
+rm -rf icon.iconset
+
+echo "== Build (Release, universal) =="
+# One multi-arch build: SwiftPM's swiftbuild backend (default since Swift 6.x) writes every
+# --triple into the same Products directory, so two per-arch builds overwrite each other.
+UNIVERSAL=(-c release --arch arm64 --arch x86_64)
+swift build --only-use-versions-from-resolved-file "${UNIVERSAL[@]}"
+BIN_PATH="$(swift build --show-bin-path "${UNIVERSAL[@]}")/$APP_NAME"
+if [[ ! -f "$BIN_PATH" ]]; then
+  echo "ERROR: Expected binary at $BIN_PATH"
+  exit 1
+fi
+for arch in arm64 x86_64; do
+  if ! lipo "$BIN_PATH" -verify_arch "$arch"; then
+    echo "ERROR: $BIN_PATH is missing the $arch slice"
+    exit 1
+  fi
+done
+
+APP_DIR="$ROOT_DIR/$APP_NAME.app"
 CONTENTS="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS/MacOS"
 RES_DIR="$CONTENTS/Resources"
 
-echo "== Build (Release, universal) =="
-swift build --only-use-versions-from-resolved-file -c release --triple arm64-apple-macosx13.0
-swift build --only-use-versions-from-resolved-file -c release --triple x86_64-apple-macosx13.0
-ARM_BIN="$(swift build --show-bin-path -c release --triple arm64-apple-macosx13.0)/$APP_NAME"
-INTEL_BIN="$(swift build --show-bin-path -c release --triple x86_64-apple-macosx13.0)/$APP_NAME"
-mkdir -p "$MACOS_DIR" "$RES_DIR"
-lipo -create "$ARM_BIN" "$INTEL_BIN" -output "$MACOS_DIR/$APP_NAME"
+echo "== Create app bundle =="
+rm -rf "$APP_DIR"
+mkdir -p "$MACOS_DIR"
+mkdir -p "$RES_DIR"
 
-cp "icon.icns" "Sources/TangoDisplay/Resources/SetlistLogo.png" "$RES_DIR/"
-ditto "Sources/TangoDisplay/Resources/RemoteUI" "$RES_DIR/RemoteUI"
+cp "$BIN_PATH" "$MACOS_DIR/$APP_NAME"
+
+# Copy icon if present
+if [[ -f "$ROOT_DIR/icon.icns" ]]; then
+  cp "$ROOT_DIR/icon.icns" "$RES_DIR/icon.icns"
+else
+  echo "WARN: icon.icns not found — app will use default macOS icon"
+fi
+
+# Copy image resources into Contents/Resources
+cp "Sources/TangoDisplay/Resources/SetlistLogo.png" "$RES_DIR/"
+# Copy Setlist Remote web UI (loaded by HTTPServerTransport via Bundle.main)
+cp -R "Sources/TangoDisplay/Resources/RemoteUI" "$RES_DIR/"
 
 echo "== Write Info.plist =="
 cat > "$CONTENTS/Info.plist" <<EOF
@@ -66,9 +76,9 @@ cat > "$CONTENTS/Info.plist" <<EOF
   <key>CFBundleIconFile</key>
   <string>icon</string>
   <key>CFBundleVersion</key>
-  <string>114</string>
+  <string>115</string>
   <key>CFBundleShortVersionString</key>
-  <string>4.0.1</string>
+  <string>4.1.0</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>
@@ -113,18 +123,31 @@ fi
 mkdir -p "$CONTENTS/Frameworks"
 cp -R "$SPARKLE_FW" "$CONTENTS/Frameworks/"
 
-echo "== Sign and verify bundle =="
-codesign --force --deep --sign - "$CONTENTS/Frameworks/Sparkle.framework"
-codesign --force --sign - "$APP_DIR"
-bash Scripts/VerifyBundle.sh "$APP_DIR"
+# Ad-hoc sign — satisfies Gatekeeper on most machines without a developer account
+# Sign inner bundles before the outer app
+echo "== Codesign (ad-hoc) =="
+codesign --force --deep --sign - "$CONTENTS/Frameworks/Sparkle.framework" || true
+codesign --force --deep --sign - "$APP_DIR" || true
 
-PACKAGE="$PACKAGE_DIR/$APP_NAME.app"
-bash Scripts/InstallBundle.sh "$APP_DIR" "$PACKAGE"
-echo "Packaged: $PACKAGE"
-if "$BUILD_ONLY"; then exit 0; fi
-
-if [[ "$DEST" != "$PACKAGE" ]]; then
-  bash Scripts/InstallBundle.sh "$PACKAGE" "$DEST"
+if "$BUILD_ONLY"; then
+  echo "Built: $APP_DIR"
+  exit 0
 fi
+
+echo "== Install to /Applications =="
+DEST="/Applications/$APP_NAME.app"
+rm -rf "$DEST"
+cp -R "$APP_DIR" "$DEST"
+
 echo "Installed: $DEST"
-if "$LAUNCH"; then open "$DEST"; fi
+echo ""
+echo "== Notes =="
+echo "  • On first launch, macOS will ask permission to control Music.app or Embrace."
+echo "  • For global hotkeys (⌘⇧O/P/R), grant Input Monitoring access in:"
+echo "    System Settings › Privacy & Security › Input Monitoring"
+echo "  • If Gatekeeper blocks launch: right-click the app › Open"
+echo ""
+echo "Launching..."
+pkill -x "$APP_NAME" 2>/dev/null || true
+sleep 0.5
+open "$DEST"

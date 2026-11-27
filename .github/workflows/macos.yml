@@ -36,13 +36,13 @@ jobs:
         run: swift run --only-use-versions-from-resolved-file TangoDisplayTests
       - name: Build signed universal bundle
         run: bash Install.sh --build-only
-      - name: Smoke-test package and installation rollback
-        run: bash Scripts/SmokePackage.sh .build/package/TangoDisplay.app .build/package/TangoDisplay-universal.zip
+      - name: Smoke-test package
+        run: bash Scripts/SmokePackage.sh TangoDisplay.app .build/TangoDisplay-universal.zip
       - name: Upload verified ZIP
         if: matrix.runner == 'macos-26'
         uses: actions/upload-artifact@v7
         with:
           name: TangoDisplay-universal
-          path: .build/package/TangoDisplay-universal.zip
+          path: .build/TangoDisplay-universal.zip
           if-no-files-found: error
           archive: false

@@ -38,7 +38,7 @@ Reviewed `main` at `af5d464` on 26 November 2026. The review focused on live pla
 
 ## P1 — Verify builds and packages before installation
 
-**Implementation.** GitHub Actions runs the pinned build, tests and universal package smoke checks on Apple Silicon and Intel. The installer stages a copy on the destination volume, verifies it and restores the previous bundle if replacement fails. Build-only mode writes under `.build/package`. [macOS workflow](.github/workflows/macos.yml) · [Package smoke checks](Scripts/SmokePackage.sh)
+**Implementation.** GitHub Actions runs the pinned build, tests and universal package smoke checks on Apple Silicon and Intel. `Install.sh --build-only` builds the signed bundle without installing it. [macOS workflow](.github/workflows/macos.yml) · [Package smoke checks](Scripts/SmokePackage.sh)
 
 **Finding.** The build instructions still say 39 tests and describe three targets with no external dependencies. The installer suppresses signing failures and then removes the destination app before copying the new bundle, so a failed copy can leave the old installation missing. [Build instructions](README.md#building-and-testing) · [Manifest](Package.swift) · [Signing and installation](Install.sh#L120)
 
